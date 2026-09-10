@@ -33,9 +33,20 @@ export default function HistoryScreen({ navigation }) {
     setLoading(true);
     setError('');
 
+    const { data: authData } = await supabase.auth.getUser();
+    const userId = authData.user?.id;
+
+    if (!userId) {
+      setSessions([]);
+      setError('You need to be logged in to see history.');
+      setLoading(false);
+      return;
+    }
+
     const { data, error: queryError } = await supabase
       .from('sessions')
       .select('id, problem_snippet, pattern, created_at, solved')
+      .eq('user_id', userId)
       .order('created_at', { ascending: false });
 
     if (queryError) {
@@ -69,7 +80,7 @@ export default function HistoryScreen({ navigation }) {
         <Text style={styles.date}>{formatDate(item.created_at)}</Text>
       </View>
       <Text style={[styles.solved, item.solved ? styles.solvedYes : styles.solvedNo]}>
-        {item.solved ? 'Solved' : 'In progress'}
+        {item.solved ? '✓ Solved' : 'In progress'}
       </Text>
     </View>
   );

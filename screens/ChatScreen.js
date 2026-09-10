@@ -1,6 +1,7 @@
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -10,15 +11,112 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { getHint } from '../lib/gemini';
+import { supabase } from '../lib/supabase';
 
-export default function ChatScreen() {
+const isPremium = false;
+const DAILY_SESSION_LIMIT = 3;
+
+function startOfTodayIso() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  return start.toISOString();
+}
+
+export default function ChatScreen({ navigation }) {
   const [problemText, setProblemText] = useState('');
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [activeProblem, setActiveProblem] = useState('');
   const [hintLevel, setHintLevel] = useState(1);
+  const [solved, setSolved] = useState(false);
+  const [atDailyLimit, setAtDailyLimit] = useState(false);
   const scrollRef = useRef(null);
+  const sessionRef = useRef({
+    problem: '',
+    pattern: '',
+    solved: false,
+    saved: true,
+  });
+
+  const persistSession = useCallback(async () => {
+    const session = sessionRef.current;
+    if (!session.problem || session.saved) {
+      return;
+    }
+
+    session.saved = true;
+
+    const { data } = await supabase.auth.getUser();
+    const userId = data.user?.id;
+    if (!userId) {
+      return;
+    }
+
+    const { error } = await supabase.from('sessions').insert({
+      user_id: userId,
+      problem_snippet: session.problem.slice(0, 100),
+      pattern: session.pattern,
+      solved: session.solved,
+    });
+
+    if (error) {
+      session.saved = false;
+    }
+  }, []);
+
+  const checkDailyLimit = useCallback(async () => {
+    if (isPremium) {
+      setAtDailyLimit(false);
+      return false;
+    }
+
+    const { data } = await supabase.auth.getUser();
+    const userId = data.user?.id;
+    if (!userId) {
+      setAtDailyLimit(false);
+      return false;
+    }
+
+    const { count, error } = await supabase
+      .from('sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .gte('created_at', startOfTodayIso());
+
+    if (error) {
+      return false;
+    }
+
+    const limited = (count ?? 0) >= DAILY_SESSION_LIMIT;
+    setAtDailyLimit(limited);
+    return limited;
+  }, []);
+
+  const showDailyLimitAlert = () => {
+    Alert.alert(
+      "You've hit your daily limit — upgrade for unlimited",
+      'Free accounts can start 3 hint sessions per day. Upgrade for unlimited access.',
+      [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Upgrade', onPress: () => navigation.navigate('Paywall') },
+      ]
+    );
+  };
+
+  useFocusEffect(
+    useCallback(() => {
+      checkDailyLimit();
+    }, [checkDailyLimit])
+  );
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('beforeRemove', () => {
+      persistSession();
+    });
+    return unsubscribe;
+  }, [navigation, persistSession]);
 
   const scrollToEnd = () => {
     requestAnimationFrame(() => {
@@ -56,6 +154,15 @@ export default function ChatScreen() {
       setHintLevel(level);
       if (showUserBubble) {
         setProblemText('');
+        setSolved(false);
+        sessionRef.current = {
+          problem: text.trim(),
+          pattern: result.pattern,
+          solved: false,
+          saved: false,
+        };
+      } else {
+        sessionRef.current.pattern = result.pattern || sessionRef.current.pattern;
       }
     } catch (error) {
       setMessages((prev) => [
@@ -73,7 +180,22 @@ export default function ChatScreen() {
     }
   };
 
-  const onGetHint = () => {
+  const onGetHint = async () => {
+    if (loading) {
+      return;
+    }
+
+    await persistSession();
+    const limited = await checkDailyLimit();
+    if (limited) {
+      showDailyLimitAlert();
+      return;
+    }
+
+    if (!problemText.trim()) {
+      return;
+    }
+
     requestHint(problemText, 1, true);
   };
 
@@ -84,6 +206,17 @@ export default function ChatScreen() {
     }
     requestHint(activeProblem, nextLevel, false);
   };
+
+  const onToggleSolved = () => {
+    if (!sessionRef.current.problem) {
+      return;
+    }
+    const next = !sessionRef.current.solved;
+    sessionRef.current.solved = next;
+    setSolved(next);
+  };
+
+  const getHintDisabled = loading || (!problemText.trim() && !atDailyLimit);
 
   return (
     <KeyboardAvoidingView
@@ -97,7 +230,22 @@ export default function ChatScreen() {
         contentContainerStyle={styles.threadContent}
         onContentSizeChange={scrollToEnd}
       >
-        {messages.length === 0 ? (
+        {atDailyLimit ? (
+          <View style={styles.limitCard}>
+            <Text style={styles.limitTitle}>Daily limit reached</Text>
+            <Text style={styles.limitBody}>
+              You've hit your daily limit — upgrade for unlimited
+            </Text>
+            <TouchableOpacity
+              style={styles.limitButton}
+              onPress={() => navigation.navigate('Paywall')}
+            >
+              <Text style={styles.limitButtonText}>Upgrade</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
+        {messages.length === 0 && !atDailyLimit ? (
           <Text style={styles.emptyText}>
             Paste a DSA problem below and tap Get Hint.
           </Text>
@@ -131,6 +279,17 @@ export default function ChatScreen() {
           </View>
         ))}
 
+        {activeProblem ? (
+          <TouchableOpacity
+            style={[styles.solvedButton, solved && styles.solvedButtonActive]}
+            onPress={onToggleSolved}
+          >
+            <Text style={[styles.solvedButtonText, solved && styles.solvedButtonTextActive]}>
+              {solved ? '✓ Marked as solved' : 'Mark as solved'}
+            </Text>
+          </TouchableOpacity>
+        ) : null}
+
         {loading ? <ActivityIndicator color="#7C6AED" style={styles.loader} /> : null}
       </ScrollView>
 
@@ -144,9 +303,9 @@ export default function ChatScreen() {
           onChangeText={setProblemText}
         />
         <TouchableOpacity
-          style={[styles.sendButton, (!problemText.trim() || loading) && styles.sendButtonDisabled]}
+          style={[styles.sendButton, getHintDisabled && styles.sendButtonDisabled]}
           onPress={onGetHint}
-          disabled={!problemText.trim() || loading}
+          disabled={getHintDisabled}
         >
           <Text style={styles.sendButtonText}>Get Hint</Text>
         </TouchableOpacity>
@@ -171,6 +330,36 @@ const styles = StyleSheet.create({
     color: '#C8C4E8',
     textAlign: 'center',
     marginTop: 40,
+  },
+  limitCard: {
+    borderWidth: 1,
+    borderColor: '#7C6AED',
+    backgroundColor: '#1C1844',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+  },
+  limitTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  limitBody: {
+    color: '#C8C4E8',
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  limitButton: {
+    backgroundColor: '#7C6AED',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  limitButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
   },
   bubble: {
     maxWidth: '88%',
@@ -211,6 +400,27 @@ const styles = StyleSheet.create({
     color: '#B7ACFF',
     fontSize: 13,
     fontWeight: '600',
+  },
+  solvedButton: {
+    alignSelf: 'flex-start',
+    marginTop: 4,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#7CDBA8',
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  solvedButtonActive: {
+    backgroundColor: '#1A3A2C',
+  },
+  solvedButtonText: {
+    color: '#7CDBA8',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  solvedButtonTextActive: {
+    color: '#7CDBA8',
   },
   loader: {
     marginVertical: 8,
