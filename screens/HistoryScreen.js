@@ -1,3 +1,4 @@
+import { getPremiumStatus } from '../lib/revenuecat';
 import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
@@ -11,7 +12,6 @@ import { useFocusEffect } from '@react-navigation/native';
 import { supabase } from '../lib/supabase';
 
 const FREE_SESSION_LIMIT = 3;
-const isPremium = false;
 
 function formatDate(value) {
   if (!value) {
@@ -26,6 +26,7 @@ function formatDate(value) {
 
 export default function HistoryScreen({ navigation }) {
   const [sessions, setSessions] = useState([]);
+  const [isPremium, setIsPremium] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -61,6 +62,7 @@ export default function HistoryScreen({ navigation }) {
 
   useFocusEffect(
     useCallback(() => {
+      getPremiumStatus().then(setIsPremium);
       loadSessions();
     }, [loadSessions])
   );

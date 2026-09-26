@@ -1,3 +1,5 @@
+import { useEffect } from 'react';
+import { initPurchases } from './lib/revenuecat';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
@@ -32,6 +34,9 @@ const screenOptions = {
 };
 
 export default function App() {
+  useEffect(() => {
+  initPurchases();
+  }, []);
   return (
     <NavigationContainer theme={navTheme}>
       <StatusBar style="light" />

@@ -14,8 +14,8 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { getHint } from '../lib/gemini';
 import { supabase } from '../lib/supabase';
+import { getPremiumStatus } from '../lib/revenuecat';
 
-const isPremium = false;
 const DAILY_SESSION_LIMIT = 3;
 
 function startOfTodayIso() {
@@ -32,39 +32,14 @@ export default function ChatScreen({ navigation }) {
   const [hintLevel, setHintLevel] = useState(1);
   const [solved, setSolved] = useState(false);
   const [atDailyLimit, setAtDailyLimit] = useState(false);
+  const [isPremium, setIsPremium] = useState(false);
   const scrollRef = useRef(null);
   const sessionRef = useRef({
+    id: null,
     problem: '',
     pattern: '',
     solved: false,
-    saved: true,
   });
-
-  const persistSession = useCallback(async () => {
-    const session = sessionRef.current;
-    if (!session.problem || session.saved) {
-      return;
-    }
-
-    session.saved = true;
-
-    const { data } = await supabase.auth.getUser();
-    const userId = data.user?.id;
-    if (!userId) {
-      return;
-    }
-
-    const { error } = await supabase.from('sessions').insert({
-      user_id: userId,
-      problem_snippet: session.problem.slice(0, 100),
-      pattern: session.pattern,
-      solved: session.solved,
-    });
-
-    if (error) {
-      session.saved = false;
-    }
-  }, []);
 
   const checkDailyLimit = useCallback(async () => {
     if (isPremium) {
@@ -92,7 +67,7 @@ export default function ChatScreen({ navigation }) {
     const limited = (count ?? 0) >= DAILY_SESSION_LIMIT;
     setAtDailyLimit(limited);
     return limited;
-  }, []);
+  }, [isPremium]);
 
   const showDailyLimitAlert = () => {
     Alert.alert(
@@ -107,16 +82,10 @@ export default function ChatScreen({ navigation }) {
 
   useFocusEffect(
     useCallback(() => {
+      getPremiumStatus().then(setIsPremium);
       checkDailyLimit();
     }, [checkDailyLimit])
   );
-
-  useEffect(() => {
-    const unsubscribe = navigation.addListener('beforeRemove', () => {
-      persistSession();
-    });
-    return unsubscribe;
-  }, [navigation, persistSession]);
 
   const scrollToEnd = () => {
     requestAnimationFrame(() => {
@@ -124,14 +93,45 @@ export default function ChatScreen({ navigation }) {
     });
   };
 
-  const requestHint = async (text, level, showUserBubble) => {
+  // Creates the sessions row the moment the first hint for a problem arrives,
+  // so it shows up in History immediately — no longer depends on leaving the screen.
+  const createSessionRow = async (problemSnippet, pattern) => {
+    const { data } = await supabase.auth.getUser();
+    const userId = data.user?.id;
+    if (!userId) return null;
+
+    const { data: inserted, error } = await supabase
+      .from('sessions')
+      .insert({
+        user_id: userId,
+        problem_snippet: problemSnippet.slice(0, 100),
+        pattern,
+        solved: false,
+      })
+      .select('id')
+      .single();
+
+    if (error || !inserted) {
+      console.warn('Session insert failed:', error?.message, error?.details, error?.hint);
+      return null;
+    }
+    return inserted.id;
+  };
+
+  const updateSessionRow = async (fields) => {
+    const id = sessionRef.current.id;
+    if (!id) return;
+    await supabase.from('sessions').update(fields).eq('id', id);
+  };
+
+  const requestHint = async (text, level, isNewProblem) => {
     if (!text.trim() || loading) {
       return;
     }
 
     setLoading(true);
 
-    if (showUserBubble) {
+    if (isNewProblem) {
       setMessages((prev) => [
         ...prev,
         { id: `user-${Date.now()}`, role: 'user', text: text.trim() },
@@ -152,17 +152,21 @@ export default function ChatScreen({ navigation }) {
       ]);
       setActiveProblem(text.trim());
       setHintLevel(level);
-      if (showUserBubble) {
+
+      if (isNewProblem) {
         setProblemText('');
         setSolved(false);
         sessionRef.current = {
+          id: null,
           problem: text.trim(),
           pattern: result.pattern,
           solved: false,
-          saved: false,
         };
+        const newId = await createSessionRow(text.trim(), result.pattern);
+        sessionRef.current.id = newId;
       } else {
         sessionRef.current.pattern = result.pattern || sessionRef.current.pattern;
+        updateSessionRow({ pattern: sessionRef.current.pattern });
       }
     } catch (error) {
       setMessages((prev) => [
@@ -185,7 +189,6 @@ export default function ChatScreen({ navigation }) {
       return;
     }
 
-    await persistSession();
     const limited = await checkDailyLimit();
     if (limited) {
       showDailyLimitAlert();
@@ -214,6 +217,7 @@ export default function ChatScreen({ navigation }) {
     const next = !sessionRef.current.solved;
     sessionRef.current.solved = next;
     setSolved(next);
+    updateSessionRow({ solved: next });
   };
 
   const getHintDisabled = loading || (!problemText.trim() && !atDailyLimit);
